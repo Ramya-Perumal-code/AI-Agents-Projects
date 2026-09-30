@@ -1,0 +1,211 @@
+
+## Mutable Default Arguments – What They Are and Why They Trip Up Even Experienced Pythonistas  
+
+### 1. The Core Idea
+
+When you define a function in Python, you can give its parameters *default values*:
+
+```python
+def greet(name="World"):
+    print(f"Hello, {name}!")
+```
+
+Those defaults are stored **once**, at **function definition time**, inside the function object’s `__defaults__` tuple.  
+If the default is an **immutable** object (e.g., `int`, `str`, `tuple`, `frozenset`), the “once‑only” nature is harmless because you can’t change the object in‑place.
+
+The trouble starts when the default is **mutable**—a `list`, `dict`, `set`, or an instance of a custom class thatimplements in‑place mutation. Because the same object lives in `__defaults__` for the *entire lifetime* of the function, every call that *doesn’t* supply an explicit argument will receive **the exact same object**, not a fresh copy.
+
+```python
+def append_to(seq=[], item=None):
+    seq.append(item)
+    return seq
+```
+
+Calling this function repeatedly without passing `seq` yields a *growing* list:
+
+```python
+>>> append_to(item=1)   # first call, seq == []
+[1]
+>>> append_to(item=2)   # second call, re‑uses the same list!
+[1, 2]
+>>> append_to(item=3)
+[1, 2, 3]
+```
+
+That behaviour is almost always *not* what you intended.
+
+---
+
+### 2. Why the Default Is Evaluated Only Once
+
+Python’s function objects store default values in a **tuple** called `__defaults__` (or `__kwdefaults__` for keyword‑only defaults). The tuple is built when the `def` statement runs—*before* the function can ever be called.  
+
+```python
+def f(x, y=[]):
+    ...
+
+print(f.__defaults__)   # ([],)
+```
+
+If `y` is mutable, the list object created at definition time lives forever (or until the function object is garbage‑collected). Each call that omits `y` merely receives a reference to that same list.
+
+---
+
+### 3. Common Real‑World Bugs
+
+| Situation | Symptom | Why It Happens |
+|-----------|---------|----------------|
+| **Collecting items in a list** (`def collect(item, bag=[]): …`) | Subsequent calls return a list containing *all* previously collected items. | The list `bag` is shared across calls. |
+| **Caching results in a dict** (`def memo(key, cache={})`) | Cache never clears; different invocations interferewith each other. | Same dictionary is reused. |
+| **Using a mutable default for type hints** (`def foo(x: list = []): …`) | The type hint is fine, but the runtime default is still mutable. | Same rule applies regardless of annotation. |
+| **Recursive functions with a default accumulator** (`def walk(node, visited=set())`) | Visited nodes “leak” from one call to another, producing wrong results. | The set persists across recursive entry points. |
+
+---
+
+### 4. The Canonical Fix: Use `None` (or another sentinel) and Create a New Object Inside
+
+```python
+def append_to(seq=None, item=None):
+    if seq is None:
+        seq = []                # a *new* list each call
+    seq.append(item)
+    return seq
+```
+
+*Why `None`?*  
+`None` is immutable, cheap to compare, and almost never a valid “real” value for the argument you’re trying to default. You can also use a custom sentinel object if `None` could be a legitimate user value:
+
+```python
+_SENTINEL = object()
+
+def foo(arg=_SENTINEL):
+    if arg is _SENTINEL:
+        arg = []               # fresh list
+    # …rest of function…
+```
+
+---
+
+### 5. Alternative Patterns
+
+| Pattern | When It Helps | Example |
+|---------|---------------|---------|
+| **Default factory via `lambda`** | When you want a *callable* default that produces a fresh object each time. |`def foo(x, lst_factory=lambda: []): lst = lst_factory(); …` |
+| **`functools.partial` with a fresh object** | When you need a partially applied function that captures a *new* mutable per‑call object. | `partial(func, lst=[])` **(still buggy)** – avoid; instead use a wrapper that builds the list inside. |
+| **`dataclasses.field(default_factory=list)`** | For methods of a `@dataclass` where you need a default mutable field. | ```python\n@dataclass\nclass Bag:\n    items: list = field(default_factory=list)\n``` |
+| **`typing.MutableSequence` and `Protocol`** | For static typing only; runtime behaviour unchanged. | N/A – still need the `None` guard. |
+
+---
+
+### 6. Deep Dive: How CPython Implements It
+
+1. **Parsing** – The `def` statement creates a `function` object.  
+2. **Compilation** – The compiler builds a tuple of default expressions (AST → code object).  
+3. **Execution** – When the `def` line runs, each default expression is evaluated *once* in the surrounding scope, and the results are stored in the function’s `__defaults__` tuple.  
+4. **Calling** – At call time, the interpreter checks `args` vs. `defaults`. If an argument is missing, the interpreter **copies the reference** from `__defaults__` into the local variable slot.
+
+Because step 3 happens *exactly once*, any mutation after that point is visible to every later call that relies on the default.
+
+---
+
+### 7. Visualising the Problem with `id`
+
+```python
+def foo(x, lst=[]):
+    print('id(lst)=', id(lst))
+    lst.append(x)
+    return lst
+
+>>> foo(1)
+id(lst)= 140450716374976
+[1]
+>>> foo(2)
+id(lst)= 140450716374976   # Same list object!
+[1, 2]
+```
+
+Contrast with the safe version:
+
+```python
+def foo(x, lst=None):
+    if lst is None:
+        lst = []
+    print('id(lst)=', id(lst))
+    lst.append(x)
+    return lst
+
+>>> foo(1)
+id(lst)= 140450716374976
+[1]
+>>> foo(2)
+id(lst)= 140450716375104   # Different object
+[2]
+```
+
+---
+
+### 8. Edge Cases & Gotchas
+
+| Edge case | What to watch for |
+|-----------|-------------------|
+| **Mutable default *inside* a mutable default** (`def f(d={}, lst=[]): …`) | Both `d` and `lst` are shared; resetting one doesn’t reset the other. |
+| **Default arguments that are *callables*** (`def f(callback=lambda x: x): …`) | The lambda itself is immutable,but if the lambda captures a mutable outer variable, you can still get surprises. |
+| **`*args` / `**kwargs` with mutable defaults** (`def f(*, config={}, **kw): …`) | Same rule: the dict persists.|
+| **`functools.lru_cache` with mutable defaults** | `lru_cache` hashes arguments; a mutable default that changes will *not* affect the cache key (because the same object identity is used), potentially leading to stale cached results. |
+| **Using mutable defaults in a *class method* (not a static method)** | The default is still stored on the *function* object, not per‑instance, so the problem survives across instances unless you deliberately bind a new default in `__init__`. |
+
+---
+
+### 9. Quick Checklist for Safe Function Signatures
+
+1. **Never** use a mutable literal (`[]`, `{}`, `set()`) as a default value.  
+2. If you really need a mutable default, **guard with `None` (or a sentinel)** and create a fresh object inside.  
+3. For dataclasses or attrs classes, **use `default_factory`** instead of `default`.  
+4. When reading third‑party code, **look for `def foo(..., bar=[]):`** and suspect a bug.  
+5. Add **unit tests** that call the function multiple times without supplying the argument; assert that the returned object is *independent* each time.  
+
+---
+
+### 10. Full Example – A Small “Collector” Class
+
+```python
+from __future__ import annotations
+from typing import List, Optional
+
+class Collector:
+    """Collect items across calls – each instance gets its own list."""
+    def __init__(self):
+        self._items: List[int] = []          # per‑instance mutable state
+
+    def add(self, item: int, bucket: Optional[List[int]] = None) -> List[int]:
+        """Append `item` to `bucket`. If `bucket` is omitted, use a fresh list."""
+        if bucket is None:
+            bucket = []                     # fresh list for this call
+        bucket.append(item)
+        # Also store in the object's own collection for demonstration:
+        self._items.append(item)
+        return bucket
+
+# Demonstration
+c = Collector()
+print(c.add(10))          # → [10]  (new list)
+print(c.add(20))          # → [20]  (new list, not polluted by previous call)
+
+# The object's own state is independent:
+print(c._items)           # → [10, 20]
+```
+
+Notice the `bucket: Optional[List[int]] = None` signature—**the canonical, type‑checked way** to express “optional mutable default”.
+
+---
+
+### 11. TL;DR Summary
+
+* **Defaults are evaluated once**, at function definition time.  
+* If a default is **mutable**, the same object is reused for every call that omits that argument.  
+* This leads to *state leaking* between calls, which is almost always a bug.  
+* The idiomatic solution: **use `None` (or a sentinel) as the default**, then inside the function create a *new* mutable object (`list()`, `{}`, `set()`, etc.).  
+* For class fields or dataclasses, prefer `default_factory`.  
+
+By internalising this pattern, you’ll avoid one of the most common “gotchas” in Python and write functions that behave predictably, no matter how many times they’re called. Happy coding!
+

@@ -1,0 +1,147 @@
+## Mutable Default Arguments – What They Are and Why They Can Be Tricky
+
+In Python, **default argument values** are evaluated **once** when the function object is created, not each time the function is called.  
+If that default value is a *mutable* object (e.g., a list, dict, set, or a custom class that implements mutability), all calls that rely on the default will share **the same underlying object**. This often leads to surprising bugs.
+
+### 1. The Core Mechanism
+
+```python
+def f(arg=[]):
+    # `arg` defaults to the *same* list object every time f is defined
+    ...
+```
+
+- When Python parses the `def` statement, it creates the function object.
+- At that moment it evaluates the expression `[]` and stores the resulting list in the function’s `__defaults__` tuple.
+- Every subsequent call that omits the `arg` parameter receives a reference to that *exact* list.
+
+### 2. Classic “Gotcha” Example
+
+```python
+def append_to(element, to=[]):
+    to.append(element)
+    return to
+
+print(append_to(1))   # -> [1]
+print(append_to(2))   # -> [1, 2]   <-- unexpected for many
+print(append_to(3))   # -> [1, 2, 3]
+```
+
+**Why?**  
+All three calls used the same default list (`to`). Each call mutated that list by appending a new element, so thechanges persisted across calls.
+
+### 3. When It *Is* Intended
+
+Sometimes you *do* want a shared mutable default (e.g., a cache that lives for the lifetime of the function). In those cases, you should be explicit about it:
+
+```python
+def get_cache(key, _cache={}):
+    return _cache.get(key)
+
+def set_cache(key, value, _cache={}):
+    _cache[key] = value
+```
+
+Even then, it’s good practice to document the behavior clearly, because it’s non‑obvious.
+
+### 4. The Idiomatic Way to Avoid the Pitfall
+
+The most common pattern is to use `None` (or another sentinel) as the default and create a new mutable object inside the function body:
+
+```python
+def append_to(element, to=None):
+    if to is None:          # sentinel check
+        to = []             # fresh list each call
+    to.append(element)
+    return to
+```
+
+Now each call gets its own list:
+
+```python
+print(append_to(1))   # [1]
+print(append_to(2))   # [2]
+print(append_to(3, ['a']))  # ['a', 3]  (explicit list passed)
+```
+
+### 5. General Recipe for Any Mutable Type
+
+| Desired mutable type | Default sentinel | Creation inside function |
+|----------------------|------------------|--------------------------|
+| `list`               | `None`           | `to = []`                |
+| `dict`               | `None`           | `mapping = {}`           |
+| `set`                | `None`           | `s = set()`              |
+| Custom mutable class| `None` or custom sentinel | `obj = MyClass()` |
+
+If you need a *different* sentinel (e.g., you actually want to allow `None` as a legitimate argument), you can create a unique object:
+
+```python
+_SENTINEL = object()
+
+def func(arg=_SENTINEL):
+    if arg is _SENTINEL:
+        arg = []   # or whatever mutable you need
+    ...
+```
+
+### 6. How to Inspect the Default Value
+
+You can peek at a function’s defaults via the `__defaults__` attribute (or `inspect.signature` for a nicer view):
+
+```python
+import inspect
+
+def foo(a, b=[]):
+    pass
+
+print(foo.__defaults__)                     # ([],)
+print(inspect.signature(foo))               # (a, b=[])
+```
+
+If you see a mutable object there, you know the function is sharing it.
+
+### 7. Common Scenarios Where the Bug Appears
+
+| Situation | Typical symptom |
+|-----------|-----------------|
+| **Recursive functions** that accumulate results in a default list | Results from previous recursion calls leak into later ones |
+| **Class methods** using a mutable default for a parameter that should be per‑instance | All instances share thesame container |
+| **Decorator factories** that store state in a default dict | State persists across decorated functions unintentionally |
+| **Testing utilities** that build up a list of cleanup actions | Tests interfere with each other because they reuse the same list |
+
+### 8. Quick Checklist When Writing Functions
+
+1. **Is the default value mutable?** (`list`, `dict`, `set`, custom mutable class)
+2. **Do I need a fresh object each call?**  
+   - ✅ Yes → use `None` (or sentinel) and create inside.  
+   - ❌ No → keep the mutable default but **document** the shared‑state behavior.
+3. **Did I accidentally use a mutable literal in the signature?**  
+   - Search for `=[]`, `={}`, `=set()`, etc.
+4. **Run a quick sanity test** after defining the function:
+
+   ```python
+   def f(x, lst=[]):
+       lst.append(x)
+       return lst
+
+   assert f(1) == [1]
+   assert f(2) == [2]   # will fail if mutable default is used unintentionally
+   ```
+
+### 9. TL;DR Summary
+
+- **Default arguments are evaluated once** at function definition time.
+- If the default is **mutable**, all calls that omit that argument share the **same object**.
+- This can cause *state leakage* across calls, leading to bugs that are hard to trace.
+- The safe, idiomatic pattern is:
+
+  ```python
+  def func(arg=None):
+      if arg is None:
+          arg = []   # or {} / set() / MyMutable()
+      ...
+  ```
+
+- Use a mutable default **only when you deliberately want shared state**, and make that intention explicit in thecode and documentation.
+
+Understanding this subtlety helps you write more predictable, bug‑free Python functions. Happy coding!
